@@ -16,7 +16,6 @@ gpu-allocator = "0.6.0"
 
 ## Setting up the allocator for Vulkan
 ```rust
-use ash::version::{DeviceV1_0, EntryV1_0, InstanceV1_0};
 use ash::vk;
 
 let mut allocator = VulkanAllocator::new(&VulkanAllocatorCreateDesc {
