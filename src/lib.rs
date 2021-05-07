@@ -3,13 +3,13 @@
 //! ## Setting up the Vulkan memory allocator
 //!
 //! ```no_run
-//! use gpu_allocator::*;
+//! use gpu_allocator::vulkan::*;
 //! # use ash::vk;
 //! # let device = todo!();
 //! # let instance = todo!();
 //! # let physical_device = todo!();
 //!
-//! let mut allocator = VulkanAllocator::new(&VulkanAllocatorCreateDesc {
+//! let mut allocator = Allocator::new(&AllocatorCreateDesc {
 //!     instance,
 //!     device,
 //!     physical_device,
@@ -20,14 +20,15 @@
 //! ## Simple Vulkan allocation example
 //!
 //! ```no_run
-//! use gpu_allocator::*;
+//! use gpu_allocator::vulkan::*;
+//! use gpu_allocator::{MemoryLocation};
 //! # use ash::vk;
 //! # use ash::version::{DeviceV1_0, EntryV1_0, InstanceV1_0};
 //! # let device = todo!();
 //! # let instance = todo!();
 //! # let physical_device = todo!();
 //!
-//! # let mut allocator = VulkanAllocator::new(&VulkanAllocatorCreateDesc {
+//! # let mut allocator = vulkan::Allocator::new(&AllocatorCreateDesc {
 //! #     instance,
 //! #     device,
 //! #     physical_device,

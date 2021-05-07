@@ -19,7 +19,7 @@ gpu-allocator = "0.6.0"
 use ash::version::{DeviceV1_0, EntryV1_0, InstanceV1_0};
 use ash::vk;
 
-let mut allocator = VulkanAllocator::new(&VulkanAllocatorCreateDesc {
+let mut allocator = vulkan::Allocator::new(&vulkan::AllocatorCreateDesc {
     instance,
     device,
     physical_device,
@@ -39,7 +39,7 @@ let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
 
 
 let allocation = allocator
-    .allocate(&AllocationCreateDesc {
+    .allocate(&vulkan::AllocationCreateDesc {
         name: "Example allocation",
         requirements,
         location: MemoryLocation::CpuToGpu,

@@ -2,8 +2,8 @@ use ash::version::DeviceV1_0;
 use ash::vk;
 
 use crate::helper::record_and_submit_command_buffer;
+use gpu_allocator::vulkan::{AllocationCreateDesc, Allocator, SubAllocation};
 use gpu_allocator::MemoryLocation;
-use gpu_allocator::vulkan::{AllocationCreateDesc, SubAllocation, Allocator};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -77,7 +77,7 @@ impl ImGuiRenderer {
                 .build()];
             let set_layouts = set_layout_infos
                 .iter()
-                .map(|info| Ok(unsafe { device.create_descriptor_set_layout(info, None) }?))
+                .map(|info| unsafe { device.create_descriptor_set_layout(info, None) })
                 .collect::<Result<Vec<_>, vk::Result>>()?;
 
             let layout_info = vk::PipelineLayoutCreateInfo::builder()
@@ -592,18 +592,16 @@ impl ImGuiRenderer {
         };
 
         Ok(Self {
+            sampler,
+
             vb_capacity,
-            vb_allocation,
-            vertex_buffer,
-
             ib_capacity,
+            vb_allocation,
             ib_allocation,
+            vertex_buffer,
             index_buffer,
-
             cb_allocation,
             constant_buffer,
-
-            sampler,
 
             font_image,
             font_image_memory,
@@ -748,8 +746,8 @@ impl ImGuiRenderer {
 
             {
                 let vertices = draw_list.vtx_buffer();
-                let dst_ptr =
-                    self.vb_allocation.mapped_ptr().unwrap().as_ptr() as *mut imgui::DrawVert;
+                let dst_ptr = unsafe { self.vb_allocation.mapped_ptr() }.unwrap().as_ptr()
+                    as *mut imgui::DrawVert;
                 let dst_ptr = unsafe { dst_ptr.offset(vb_offset) };
                 unsafe {
                     std::ptr::copy_nonoverlapping(vertices.as_ptr(), dst_ptr, vertices.len())
@@ -759,8 +757,8 @@ impl ImGuiRenderer {
 
             {
                 let indices = draw_list.idx_buffer();
-                let dst_ptr =
-                    self.ib_allocation.mapped_ptr().unwrap().as_ptr() as *mut imgui::DrawIdx;
+                let dst_ptr = unsafe { self.ib_allocation.mapped_ptr() }.unwrap().as_ptr()
+                    as *mut imgui::DrawIdx;
                 let dst_ptr = unsafe { dst_ptr.offset(ib_offset) };
                 unsafe { std::ptr::copy_nonoverlapping(indices.as_ptr(), dst_ptr, indices.len()) };
                 ib_offset += indices.len() as isize;
