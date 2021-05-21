@@ -47,13 +47,15 @@ let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
 let allocation = allocator
     .allocate(&AllocationCreateDesc {
         name: "Example allocation",
-        requirements,
+        size: requirements.size,
+        alignment: requirements.alignment,
+        vk_memory_type_bits: requirements.memory_type_bits,
         location: MemoryLocation::CpuToGpu,
         linear: true, // Buffers are always linear
     }).unwrap();
 
 // Bind memory to the buffer
-unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()).unwrap() };
+unsafe { device.bind_buffer_memory(buffer, allocation.vulkan_memory(), allocation.offset()).unwrap() };
 
 // Cleanup
 allocator.free(allocation).unwrap();
