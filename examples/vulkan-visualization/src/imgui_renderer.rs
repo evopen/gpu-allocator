@@ -284,13 +284,17 @@ impl ImGuiRenderer {
             let allocation = allocator
                 .allocate(&AllocationCreateDesc {
                     name: "ImGui font image",
-                    requirements,
+                    size: requirements.size,
+                    alignment: requirements.alignment,
+                    vk_memory_type_bits: requirements.memory_type_bits,
                     location: MemoryLocation::GpuOnly,
                     linear: false,
                 })
                 .unwrap();
-            unsafe { device.bind_image_memory(image, allocation.memory(), allocation.offset()) }
-                .unwrap();
+            unsafe {
+                device.bind_image_memory(image, allocation.vulkan_memory(), allocation.offset())
+            }
+            .unwrap();
 
             // Create image view
             let view_create_info = vk::ImageViewCreateInfo::builder()
@@ -328,7 +332,9 @@ impl ImGuiRenderer {
                 let buffer_memory = allocator
                     .allocate(&AllocationCreateDesc {
                         name: "ImGui font image upload buffer",
-                        requirements,
+                        size: requirements.size,
+                        alignment: requirements.alignment,
+                        vk_memory_type_bits: requirements.memory_type_bits,
                         location: MemoryLocation::CpuToGpu,
                         linear: true,
                     })
@@ -337,7 +343,7 @@ impl ImGuiRenderer {
                 unsafe {
                     device.bind_buffer_memory(
                         buffer,
-                        buffer_memory.memory(),
+                        buffer_memory.vulkan_memory(),
                         buffer_memory.offset(),
                     )
                 }?;
@@ -491,13 +497,17 @@ impl ImGuiRenderer {
             let allocation = allocator
                 .allocate(&AllocationCreateDesc {
                     name: "ImGui Vertex buffer",
-                    requirements,
+                    size: requirements.size,
+                    alignment: requirements.alignment,
+                    vk_memory_type_bits: requirements.memory_type_bits,
                     location: MemoryLocation::CpuToGpu,
                     linear: true,
                 })
                 .unwrap();
 
-            unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }?;
+            unsafe {
+                device.bind_buffer_memory(buffer, allocation.vulkan_memory(), allocation.offset())
+            }?;
 
             (buffer, allocation, capacity)
         };
@@ -517,13 +527,17 @@ impl ImGuiRenderer {
             let allocation = allocator
                 .allocate(&AllocationCreateDesc {
                     name: "ImGui Index buffer",
-                    requirements,
+                    size: requirements.size,
+                    alignment: requirements.alignment,
+                    vk_memory_type_bits: requirements.memory_type_bits,
                     location: MemoryLocation::CpuToGpu,
                     linear: true,
                 })
                 .unwrap();
 
-            unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }?;
+            unsafe {
+                device.bind_buffer_memory(buffer, allocation.vulkan_memory(), allocation.offset())
+            }?;
 
             (buffer, allocation, capacity)
         };
@@ -541,13 +555,17 @@ impl ImGuiRenderer {
             let allocation = allocator
                 .allocate(&AllocationCreateDesc {
                     name: "ImGui Constant buffer",
-                    requirements,
+                    size: requirements.size,
+                    alignment: requirements.alignment,
+                    vk_memory_type_bits: requirements.memory_type_bits,
                     location: MemoryLocation::CpuToGpu,
                     linear: true,
                 })
                 .unwrap();
 
-            unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }?;
+            unsafe {
+                device.bind_buffer_memory(buffer, allocation.vulkan_memory(), allocation.offset())
+            }?;
 
             (buffer, allocation)
         };
