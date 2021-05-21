@@ -715,12 +715,13 @@ impl VulkanMemoryType {
                 memory_block_index: block_index,
                 memory_type_index: self.memory_type_index as usize,
                 vk_device_memory: mem_block.device_memory,
+                #[cfg(windows)]
+                dx12_device_memory: std::ptr::null_mut(),
                 offset,
                 size,
                 mapped_ptr: std::ptr::NonNull::new(mem_block.mapped_ptr),
                 name: Some(desc.name.to_owned()),
                 backtrace: backtrace.map(|s| s.to_owned()),
-                ..Default::default()
             });
         }
 
@@ -749,12 +750,13 @@ impl VulkanMemoryType {
                             memory_block_index: mem_block_i,
                             memory_type_index: self.memory_type_index as usize,
                             vk_device_memory: mem_block.device_memory,
+                            #[cfg(windows)]
+                            dx12_device_memory: std::ptr::null_mut(),
                             offset,
                             size,
                             mapped_ptr,
                             name: Some(desc.name.to_owned()),
                             backtrace: backtrace.map(|s| s.to_owned()),
-                            ..Default::default()
                         });
                     }
                     Err(err) => match err {
@@ -821,12 +823,13 @@ impl VulkanMemoryType {
             memory_block_index: new_block_index,
             memory_type_index: self.memory_type_index as usize,
             vk_device_memory: mem_block.device_memory,
+            #[cfg(windows)]
+            dx12_device_memory: std::ptr::null_mut(),
             offset,
             size,
             mapped_ptr,
             name: Some(desc.name.to_owned()),
             backtrace: backtrace.map(|s| s.to_owned()),
-            ..Default::default()
         })
     }
 
