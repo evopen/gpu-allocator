@@ -62,6 +62,7 @@ use ash::version::{DeviceV1_0, InstanceV1_0};
 use ash::vk;
 use log::{log, Level};
 
+#[cfg(windows)]
 use winapi::um::d3d12;
 
 mod result;
@@ -135,6 +136,7 @@ impl Default for AllocatorDebugSettings {
     }
 }
 
+#[cfg(windows)]
 pub struct Dx12AllocatorCreateDesc {
     pub device: *mut d3d12::ID3D12Device,
     pub debug_settings: AllocatorDebugSettings,
@@ -198,6 +200,7 @@ pub struct SubAllocation {
     memory_block_index: usize,
     memory_type_index: usize,
     vk_device_memory: vk::DeviceMemory,
+    #[cfg(windows)]
     dx12_device_memory: *mut d3d12::ID3D12Heap,
     offset: u64,
     size: u64,
@@ -227,6 +230,7 @@ impl SubAllocation {
     pub unsafe fn vulkan_memory(&self) -> vk::DeviceMemory {
         self.vk_device_memory
     }
+    #[cfg(windows)]
     pub unsafe fn dx12_heap(&self) -> *mut d3d12::ID3D12Heap {
         self.dx12_device_memory
     }
@@ -278,6 +282,7 @@ impl Default for SubAllocation {
             memory_block_index: !0,
             memory_type_index: !0,
             vk_device_memory: vk::DeviceMemory::null(),
+            #[cfg(windows)]
             dx12_device_memory: std::ptr::null_mut(),
             offset: 0,
             size: 0,
@@ -296,10 +301,12 @@ enum AllocationType {
     NonLinear,
 }
 
+#[cfg(windows)]
 struct Dx12MemoryBlock {
     device_memory: *mut d3d12::ID3D12Heap,
     sub_allocator: Box<dyn SubAllocator>,
 }
+#[cfg(windows)]
 impl Dx12MemoryBlock {
     fn new(
         device: &mut d3d12::ID3D12Device,
@@ -427,13 +434,15 @@ const DEFAULT_DEVICE_MEMBLOCK_SIZE: u64 = 256 * 1024 * 1024;
 const DEFAULT_HOST_MEMBLOCK_SIZE: u64 = 64 * 1024 * 1024;
 
 //#[derive(Debug)]
+
+#[cfg(windows)]
 struct Dx12MemoryType {
     memory_blocks: Vec<Option<Dx12MemoryBlock>>,
     memory_properties: d3d12::D3D12_HEAP_PROPERTIES,
     memory_type_index: usize,
     active_general_blocks: usize,
 }
-
+#[cfg(windows)]
 impl Dx12MemoryType {
     fn allocate(
         &mut self,
@@ -854,11 +863,13 @@ impl VulkanMemoryType {
     }
 }
 
+#[cfg(windows)]
 pub struct Dx12Allocator {
     device: *mut d3d12::ID3D12Device,
     debug_settings: AllocatorDebugSettings,
     memory_types: Vec<Dx12MemoryType>,
 }
+#[cfg(windows)]
 impl Dx12Allocator {
     pub fn new(desc: &Dx12AllocatorCreateDesc) -> Self {
         let heap_types = [
@@ -981,6 +992,7 @@ impl Dx12Allocator {
     }
 }
 
+#[cfg(windows)]
 impl Drop for Dx12Allocator {
     fn drop(&mut self) {
         if self.debug_settings.log_leaks_on_shutdown {
