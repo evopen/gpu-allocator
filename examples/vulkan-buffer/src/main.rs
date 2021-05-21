@@ -109,7 +109,9 @@ fn main() {
 
         let allocation = allocator
             .allocate(&AllocationCreateDesc {
-                requirements,
+                size: requirements.size,
+                alignment: requirements.alignment,
+                vk_memory_type_bits: requirements.memory_type_bits,
                 location,
                 linear: true,
                 name: "test allocation",
@@ -118,7 +120,7 @@ fn main() {
 
         unsafe {
             device
-                .bind_buffer_memory(test_buffer, allocation.memory(), allocation.offset())
+                .bind_buffer_memory(test_buffer, allocation.vulkan_memory(), allocation.offset())
                 .unwrap()
         };
 
@@ -141,7 +143,9 @@ fn main() {
 
         let allocation = allocator
             .allocate(&AllocationCreateDesc {
-                requirements,
+                size: requirements.size,
+                alignment: requirements.alignment,
+                vk_memory_type_bits: requirements.memory_type_bits,
                 location,
                 linear: true,
                 name: "test allocation",
@@ -150,7 +154,7 @@ fn main() {
 
         unsafe {
             device
-                .bind_buffer_memory(test_buffer, allocation.memory(), allocation.offset())
+                .bind_buffer_memory(test_buffer, allocation.vulkan_memory(), allocation.offset())
                 .unwrap()
         };
 
@@ -173,7 +177,9 @@ fn main() {
 
         let allocation = allocator
             .allocate(&AllocationCreateDesc {
-                requirements,
+                size: requirements.size,
+                alignment: requirements.alignment,
+                vk_memory_type_bits: requirements.memory_type_bits,
                 location,
                 linear: true,
                 name: "test allocation",
@@ -182,7 +188,7 @@ fn main() {
 
         unsafe {
             device
-                .bind_buffer_memory(test_buffer, allocation.memory(), allocation.offset())
+                .bind_buffer_memory(test_buffer, allocation.vulkan_memory(), allocation.offset())
                 .unwrap()
         };
 

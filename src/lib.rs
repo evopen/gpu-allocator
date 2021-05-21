@@ -62,6 +62,8 @@ use ash::version::{DeviceV1_0, InstanceV1_0};
 use ash::vk;
 use log::{log, Level};
 
+use winapi::um::d3d12;
+
 mod result;
 pub use result::*;
 
@@ -79,7 +81,10 @@ pub struct AllocationCreateDesc<'a> {
     /// Name of the allocation, for tracking and debugging purposes
     pub name: &'a str,
     /// Vulkan memory requirements for an allocation
-    pub requirements: vk::MemoryRequirements,
+    pub size: u64,
+    pub alignment: u64,
+    pub vk_memory_type_bits: u32,
+
     /// Location where the memory allocation should be stored
     pub location: MemoryLocation,
     /// If the resource is linear (buffer / linear texture) or a regular (tiled) texture.
@@ -128,6 +133,11 @@ impl Default for AllocatorDebugSettings {
             log_stack_traces: false,
         }
     }
+}
+
+pub struct Dx12AllocatorCreateDesc {
+    pub device: *mut d3d12::ID3D12Device,
+    pub debug_settings: AllocatorDebugSettings,
 }
 
 pub struct VulkanAllocatorCreateDesc {
@@ -187,7 +197,8 @@ pub struct SubAllocation {
     chunk_id: Option<std::num::NonZeroU64>,
     memory_block_index: usize,
     memory_type_index: usize,
-    device_memory: vk::DeviceMemory,
+    vk_device_memory: vk::DeviceMemory,
+    dx12_device_memory: *mut d3d12::ID3D12Heap,
     offset: u64,
     size: u64,
     mapped_ptr: Option<std::ptr::NonNull<std::ffi::c_void>>,
@@ -213,8 +224,11 @@ impl SubAllocation {
     /// The result of this function can safely be used to pass into `bind_buffer_memory` (`vkBindBufferMemory`),
     /// `bind_texture_memory` (`vkBindTextureMemory`) etc. It's exposed for this reason. Keep in mind to also
     /// pass `Self::offset()` along to those.
-    pub unsafe fn memory(&self) -> vk::DeviceMemory {
-        self.device_memory
+    pub unsafe fn vulkan_memory(&self) -> vk::DeviceMemory {
+        self.vk_device_memory
+    }
+    pub unsafe fn dx12_heap(&self) -> *mut d3d12::ID3D12Heap {
+        self.dx12_device_memory
     }
 
     /// Returns the offset of the allocation on the vk::DeviceMemory.
@@ -263,7 +277,8 @@ impl Default for SubAllocation {
             chunk_id: None,
             memory_block_index: !0,
             memory_type_index: !0,
-            device_memory: vk::DeviceMemory::null(),
+            vk_device_memory: vk::DeviceMemory::null(),
+            dx12_device_memory: std::ptr::null_mut(),
             offset: 0,
             size: 0,
             mapped_ptr: None,
@@ -281,15 +296,63 @@ enum AllocationType {
     NonLinear,
 }
 
+struct Dx12MemoryBlock {
+    device_memory: *mut d3d12::ID3D12Heap,
+    sub_allocator: Box<dyn SubAllocator>,
+}
+impl Dx12MemoryBlock {
+    fn new(
+        device: &mut d3d12::ID3D12Device,
+        size: u64,
+        heap_properties: &d3d12::D3D12_HEAP_PROPERTIES,
+        dedicated: bool,
+    ) -> Result<Self> {
+        let device_memory = unsafe {
+            let mut desc = d3d12::D3D12_HEAP_DESC::default();
+            desc.SizeInBytes = size;
+            desc.Properties = *heap_properties;
+            desc.Alignment = d3d12::D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT as u64;
+            desc.Flags = d3d12::D3D12_HEAP_FLAG_NONE;
+
+            let mut heap: *mut d3d12::ID3D12Heap = std::ptr::null_mut();
+
+            let hr =
+                device.CreateHeap(&desc, &d3d12::IID_ID3D12Heap, &mut heap as *mut _ as *mut _);
+            assert_eq!(
+                hr,
+                winapi::shared::winerror::S_OK,
+                "Failed to allocate ID3D12Heap of {} bytes",
+                size,
+            );
+            heap
+        };
+
+        let sub_allocator: Box<dyn SubAllocator> = if dedicated {
+            Box::new(DedicatedBlockAllocator::new(size))
+        } else {
+            Box::new(FreeListAllocator::new(size))
+        };
+
+        Ok(Self {
+            device_memory,
+            sub_allocator,
+        })
+    }
+
+    fn destroy(self) {
+        unsafe { self.device_memory.as_mut().unwrap().Release() };
+    }
+}
+
 #[derive(Debug)]
-struct MemoryBlock {
+struct VulkanMemoryBlock {
     device_memory: vk::DeviceMemory,
     size: u64,
     mapped_ptr: *mut std::ffi::c_void,
     sub_allocator: Box<dyn SubAllocator>,
 }
 
-impl MemoryBlock {
+impl VulkanMemoryBlock {
     fn new(
         device: &ash::Device,
         size: u64,
@@ -357,26 +420,24 @@ impl MemoryBlock {
 
 // `mapped_ptr` is safe to send or share across threads because
 // it is never exposed publicly through [`MemoryBlock`].
-unsafe impl Send for MemoryBlock {}
-unsafe impl Sync for MemoryBlock {}
-
-#[derive(Debug)]
-struct MemoryType {
-    memory_blocks: Vec<Option<MemoryBlock>>,
-    memory_properties: vk::MemoryPropertyFlags,
-    memory_type_index: usize,
-    heap_index: usize,
-    mappable: bool,
-    active_general_blocks: usize,
-}
+unsafe impl Send for VulkanMemoryBlock {}
+unsafe impl Sync for VulkanMemoryBlock {}
 
 const DEFAULT_DEVICE_MEMBLOCK_SIZE: u64 = 256 * 1024 * 1024;
 const DEFAULT_HOST_MEMBLOCK_SIZE: u64 = 64 * 1024 * 1024;
 
-impl MemoryType {
+//#[derive(Debug)]
+struct Dx12MemoryType {
+    memory_blocks: Vec<Option<Dx12MemoryBlock>>,
+    memory_properties: d3d12::D3D12_HEAP_PROPERTIES,
+    memory_type_index: usize,
+    active_general_blocks: usize,
+}
+
+impl Dx12MemoryType {
     fn allocate(
         &mut self,
-        device: &ash::Device,
+        device: &mut d3d12::ID3D12Device,
         desc: &AllocationCreateDesc,
         granularity: u64,
         backtrace: Option<&str>,
@@ -387,22 +448,18 @@ impl MemoryType {
             AllocationType::NonLinear
         };
 
-        let memblock_size = if self
-            .memory_properties
-            .contains(vk::MemoryPropertyFlags::HOST_VISIBLE)
-        {
-            DEFAULT_HOST_MEMBLOCK_SIZE
-        } else {
+        let memblock_size = if self.memory_properties.Type == d3d12::D3D12_HEAP_TYPE_DEFAULT {
             DEFAULT_DEVICE_MEMBLOCK_SIZE
+        } else {
+            DEFAULT_HOST_MEMBLOCK_SIZE
         };
 
-        let size = desc.requirements.size;
-        let alignment = desc.requirements.alignment;
+        let size = desc.size;
+        let alignment = desc.alignment;
 
         // Create a dedicated block for large memory allocations
         if size > memblock_size {
-            let mem_block =
-                MemoryBlock::new(device, size, self.memory_type_index, self.mappable, true)?;
+            let mem_block = Dx12MemoryBlock::new(device, size, &self.memory_properties, true)?;
 
             let mut block_index = None;
             for (i, block) in self.memory_blocks.iter().enumerate() {
@@ -440,12 +497,221 @@ impl MemoryType {
                 chunk_id: Some(chunk_id),
                 memory_block_index: block_index,
                 memory_type_index: self.memory_type_index as usize,
-                device_memory: mem_block.device_memory,
+                dx12_device_memory: mem_block.device_memory,
+                offset,
+                size,
+                mapped_ptr: None,
+                name: Some(desc.name.to_owned()),
+                backtrace: backtrace.map(|s| s.to_owned()),
+                ..SubAllocation::default()
+            });
+        }
+
+        let mut empty_block_index = None;
+        for (mem_block_i, mem_block) in self.memory_blocks.iter_mut().enumerate().rev() {
+            if let Some(mem_block) = mem_block {
+                let allocation = mem_block.sub_allocator.allocate(
+                    size,
+                    alignment,
+                    allocation_type,
+                    granularity,
+                    desc.name,
+                    backtrace,
+                );
+
+                match allocation {
+                    Ok((offset, chunk_id)) => {
+                        return Ok(SubAllocation {
+                            chunk_id: Some(chunk_id),
+                            memory_block_index: mem_block_i,
+                            memory_type_index: self.memory_type_index as usize,
+                            dx12_device_memory: mem_block.device_memory,
+                            offset,
+                            size,
+                            mapped_ptr: None,
+                            name: Some(desc.name.to_owned()),
+                            backtrace: backtrace.map(|s| s.to_owned()),
+                            ..Default::default()
+                        });
+                    }
+                    Err(err) => match err {
+                        AllocationError::OutOfMemory => {} // Block is full, continue search.
+                        _ => return Err(err),              // Unhandled error, return.
+                    },
+                }
+            } else if empty_block_index == None {
+                empty_block_index = Some(mem_block_i);
+            }
+        }
+
+        let new_memory_block =
+            Dx12MemoryBlock::new(device, memblock_size, &self.memory_properties, false)?;
+
+        let new_block_index = if let Some(block_index) = empty_block_index {
+            self.memory_blocks[block_index] = Some(new_memory_block);
+            block_index
+        } else {
+            self.memory_blocks.push(Some(new_memory_block));
+            self.memory_blocks.len() - 1
+        };
+
+        self.active_general_blocks += 1;
+
+        let mem_block = self.memory_blocks[new_block_index]
+            .as_mut()
+            .ok_or_else(|| AllocationError::Internal("memory block must be Some".into()))?;
+        let allocation = mem_block.sub_allocator.allocate(
+            size,
+            alignment,
+            allocation_type,
+            granularity,
+            desc.name,
+            backtrace,
+        );
+        let (offset, chunk_id) = match allocation {
+            Ok(value) => value,
+            Err(err) => match err {
+                AllocationError::OutOfMemory => {
+                    return Err(AllocationError::Internal(
+                        "Allocation that must succeed failed. This is a bug in the allocator."
+                            .into(),
+                    ))
+                }
+                _ => return Err(err),
+            },
+        };
+
+        Ok(SubAllocation {
+            chunk_id: Some(chunk_id),
+            memory_block_index: new_block_index,
+            memory_type_index: self.memory_type_index as usize,
+            dx12_device_memory: mem_block.device_memory,
+            offset,
+            size,
+            mapped_ptr: None,
+            name: Some(desc.name.to_owned()),
+            backtrace: backtrace.map(|s| s.to_owned()),
+            ..Default::default()
+        })
+    }
+
+    fn free(&mut self, sub_allocation: SubAllocation) -> Result<()> {
+        let block_idx = sub_allocation.memory_block_index;
+
+        let mem_block = self.memory_blocks[block_idx]
+            .as_mut()
+            .ok_or_else(|| AllocationError::Internal("Memory block must be Some.".into()))?;
+
+        mem_block.sub_allocator.free(sub_allocation)?;
+
+        if mem_block.sub_allocator.is_empty() {
+            if mem_block.sub_allocator.supports_general_allocations() {
+                if self.active_general_blocks > 1 {
+                    let block = self.memory_blocks[block_idx].take();
+                    let block = block.ok_or_else(|| {
+                        AllocationError::Internal("Memory block must be Some.".into())
+                    })?;
+                    block.destroy();
+
+                    self.active_general_blocks -= 1;
+                }
+            } else {
+                let block = self.memory_blocks[block_idx].take();
+                let block = block.ok_or_else(|| {
+                    AllocationError::Internal("Memory block must be Some.".into())
+                })?;
+                block.destroy();
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct VulkanMemoryType {
+    memory_blocks: Vec<Option<VulkanMemoryBlock>>,
+    memory_properties: vk::MemoryPropertyFlags,
+    memory_type_index: usize,
+    heap_index: usize,
+    mappable: bool,
+    active_general_blocks: usize,
+}
+
+impl VulkanMemoryType {
+    fn allocate(
+        &mut self,
+        device: &ash::Device,
+        desc: &AllocationCreateDesc,
+        granularity: u64,
+        backtrace: Option<&str>,
+    ) -> Result<SubAllocation> {
+        let allocation_type = if desc.linear {
+            AllocationType::Linear
+        } else {
+            AllocationType::NonLinear
+        };
+
+        let memblock_size = if self
+            .memory_properties
+            .contains(vk::MemoryPropertyFlags::HOST_VISIBLE)
+        {
+            DEFAULT_HOST_MEMBLOCK_SIZE
+        } else {
+            DEFAULT_DEVICE_MEMBLOCK_SIZE
+        };
+
+        let size = desc.size;
+        let alignment = desc.alignment;
+
+        // Create a dedicated block for large memory allocations
+        if size > memblock_size {
+            let mem_block =
+                VulkanMemoryBlock::new(device, size, self.memory_type_index, self.mappable, true)?;
+
+            let mut block_index = None;
+            for (i, block) in self.memory_blocks.iter().enumerate() {
+                if block.is_none() {
+                    block_index = Some(i);
+                    break;
+                }
+            }
+
+            let block_index = match block_index {
+                Some(i) => {
+                    self.memory_blocks[i].replace(mem_block);
+                    i
+                }
+                None => {
+                    self.memory_blocks.push(Some(mem_block));
+                    self.memory_blocks.len() - 1
+                }
+            };
+
+            let mem_block = self.memory_blocks[block_index]
+                .as_mut()
+                .ok_or_else(|| AllocationError::Internal("Memory block must be Some".into()))?;
+
+            let (offset, chunk_id) = mem_block.sub_allocator.allocate(
+                size,
+                alignment,
+                allocation_type,
+                granularity,
+                desc.name,
+                backtrace,
+            )?;
+
+            return Ok(SubAllocation {
+                chunk_id: Some(chunk_id),
+                memory_block_index: block_index,
+                memory_type_index: self.memory_type_index as usize,
+                vk_device_memory: mem_block.device_memory,
                 offset,
                 size,
                 mapped_ptr: std::ptr::NonNull::new(mem_block.mapped_ptr),
                 name: Some(desc.name.to_owned()),
                 backtrace: backtrace.map(|s| s.to_owned()),
+                ..Default::default()
             });
         }
 
@@ -473,12 +739,13 @@ impl MemoryType {
                             chunk_id: Some(chunk_id),
                             memory_block_index: mem_block_i,
                             memory_type_index: self.memory_type_index as usize,
-                            device_memory: mem_block.device_memory,
+                            vk_device_memory: mem_block.device_memory,
                             offset,
                             size,
                             mapped_ptr,
                             name: Some(desc.name.to_owned()),
                             backtrace: backtrace.map(|s| s.to_owned()),
+                            ..Default::default()
                         });
                     }
                     Err(err) => match err {
@@ -491,7 +758,7 @@ impl MemoryType {
             }
         }
 
-        let new_memory_block = MemoryBlock::new(
+        let new_memory_block = VulkanMemoryBlock::new(
             device,
             memblock_size,
             self.memory_type_index,
@@ -544,12 +811,13 @@ impl MemoryType {
             chunk_id: Some(chunk_id),
             memory_block_index: new_block_index,
             memory_type_index: self.memory_type_index as usize,
-            device_memory: mem_block.device_memory,
+            vk_device_memory: mem_block.device_memory,
             offset,
             size,
             mapped_ptr,
             name: Some(desc.name.to_owned()),
             backtrace: backtrace.map(|s| s.to_owned()),
+            ..Default::default()
         })
     }
 
@@ -586,8 +854,153 @@ impl MemoryType {
     }
 }
 
+pub struct Dx12Allocator {
+    device: *mut d3d12::ID3D12Device,
+    debug_settings: AllocatorDebugSettings,
+    memory_types: Vec<Dx12MemoryType>,
+}
+impl Dx12Allocator {
+    pub fn new(desc: &Dx12AllocatorCreateDesc) -> Self {
+        let heap_types = [
+            d3d12::D3D12_HEAP_PROPERTIES {
+                Type: d3d12::D3D12_HEAP_TYPE_DEFAULT,
+                CreationNodeMask: 1,
+                VisibleNodeMask: 1,
+                ..Default::default()
+            },
+            d3d12::D3D12_HEAP_PROPERTIES {
+                Type: d3d12::D3D12_HEAP_TYPE_CUSTOM,
+                CPUPageProperty: d3d12::D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE,
+                MemoryPoolPreference: d3d12::D3D12_MEMORY_POOL_L0,
+                CreationNodeMask: 1,
+                VisibleNodeMask: 1,
+            },
+            d3d12::D3D12_HEAP_PROPERTIES {
+                Type: d3d12::D3D12_HEAP_TYPE_CUSTOM,
+                CPUPageProperty: d3d12::D3D12_CPU_PAGE_PROPERTY_WRITE_BACK,
+                MemoryPoolPreference: d3d12::D3D12_MEMORY_POOL_L0,
+                CreationNodeMask: 1,
+                VisibleNodeMask: 1,
+            },
+        ];
+
+        let memory_types = heap_types
+            .iter()
+            .enumerate()
+            .map(|(i, &memory_properties)| Dx12MemoryType {
+                memory_blocks: Vec::default(),
+                memory_properties,
+                memory_type_index: i,
+                active_general_blocks: 0,
+            })
+            .collect::<Vec<_>>();
+
+        Self {
+            memory_types,
+            device: desc.device.clone(),
+            debug_settings: desc.debug_settings,
+        }
+    }
+
+    pub fn allocate(&mut self, desc: &AllocationCreateDesc) -> Result<SubAllocation> {
+        let size = desc.size;
+        let alignment = desc.alignment;
+
+        let backtrace = if self.debug_settings.store_stack_traces {
+            Some(format!("{:?}", backtrace::Backtrace::new()))
+        } else {
+            None
+        };
+
+        if self.debug_settings.log_allocations {
+            log!(
+                Level::Debug,
+                "Allocating \"{}\" of {} bytes with an alignment of {}.",
+                &desc.name,
+                size,
+                alignment
+            );
+            if self.debug_settings.log_stack_traces {
+                let backtrace = backtrace
+                    .clone()
+                    .unwrap_or(format!("{:?}", backtrace::Backtrace::new()));
+                log!(Level::Debug, "Allocation stack trace: {}", &backtrace);
+            }
+        }
+
+        if size == 0 || !alignment.is_power_of_two() {
+            return Err(AllocationError::InvalidAllocationCreateDesc);
+        }
+
+        let memory_type_index = match desc.location {
+            MemoryLocation::GpuOnly => 0,
+            MemoryLocation::CpuToGpu => 1,
+            MemoryLocation::GpuToCpu => 2,
+            MemoryLocation::Unknown => panic!("Not sure what to do with unknown at the moment"),
+        };
+
+        let sub_allocation = self.memory_types[memory_type_index].allocate(
+            unsafe { self.device.as_mut().unwrap() },
+            desc,
+            256, //TODO(max): Is this even a thing in D3D12?
+            backtrace.as_deref(),
+        );
+
+        sub_allocation
+    }
+
+    pub fn free(&mut self, sub_allocation: SubAllocation) -> Result<()> {
+        if self.debug_settings.log_frees {
+            let name = sub_allocation.name.as_deref().unwrap_or("<null>");
+            log!(Level::Debug, "Free'ing \"{}\".", name);
+            if self.debug_settings.log_stack_traces {
+                let backtrace = format!("{:?}", backtrace::Backtrace::new());
+                log!(Level::Debug, "Free stack trace: {}", backtrace);
+            }
+        }
+
+        if sub_allocation.is_null() {
+            return Ok(());
+        }
+
+        self.memory_types[sub_allocation.memory_type_index].free(sub_allocation)?;
+
+        Ok(())
+    }
+
+    pub fn report_memory_leaks(&self, log_level: Level) {
+        for (mem_type_i, mem_type) in self.memory_types.iter().enumerate() {
+            for (block_i, mem_block) in mem_type.memory_blocks.iter().enumerate() {
+                if let Some(mem_block) = mem_block {
+                    mem_block
+                        .sub_allocator
+                        .report_memory_leaks(log_level, mem_type_i, block_i);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Dx12Allocator {
+    fn drop(&mut self) {
+        if self.debug_settings.log_leaks_on_shutdown {
+            self.report_memory_leaks(Level::Warn);
+        }
+
+        // Free all remaining memory blocks
+        for mem_type in self.memory_types.iter_mut() {
+            for mem_block in mem_type.memory_blocks.iter_mut() {
+                let block = mem_block.take();
+                if let Some(block) = block {
+                    block.destroy();
+                }
+            }
+        }
+    }
+}
+
 pub struct VulkanAllocator {
-    memory_types: Vec<MemoryType>,
+    memory_types: Vec<VulkanMemoryType>,
     #[cfg(feature = "visualizer")]
     memory_heaps: Vec<vk::MemoryHeap>,
     device: ash::Device,
@@ -654,7 +1067,7 @@ impl VulkanAllocator {
         let memory_types = memory_types
             .iter()
             .enumerate()
-            .map(|(i, mem_type)| MemoryType {
+            .map(|(i, mem_type)| VulkanMemoryType {
                 memory_blocks: Vec::default(),
                 memory_properties: mem_type.property_flags,
                 memory_type_index: i,
@@ -684,8 +1097,14 @@ impl VulkanAllocator {
     }
 
     pub fn allocate(&mut self, desc: &AllocationCreateDesc) -> Result<SubAllocation> {
-        let size = desc.requirements.size;
-        let alignment = desc.requirements.alignment;
+        let size = desc.size;
+        let alignment = desc.alignment;
+
+        let requirements = vk::MemoryRequirements {
+            size,
+            alignment,
+            memory_type_bits: desc.vk_memory_type_bits,
+        };
 
         let backtrace = if self.debug_settings.store_stack_traces {
             Some(format!("{:?}", backtrace::Backtrace::new()))
@@ -728,7 +1147,7 @@ impl VulkanAllocator {
             MemoryLocation::Unknown => vk::MemoryPropertyFlags::empty(),
         };
         let mut memory_type_index_opt =
-            self.find_memorytype_index(&desc.requirements, mem_loc_preferred_bits);
+            self.find_memorytype_index(&requirements, mem_loc_preferred_bits);
 
         if memory_type_index_opt.is_none() {
             let mem_loc_required_bits = match desc.location {
@@ -743,7 +1162,7 @@ impl VulkanAllocator {
             };
 
             memory_type_index_opt =
-                self.find_memorytype_index(&desc.requirements, mem_loc_required_bits);
+                self.find_memorytype_index(&requirements, mem_loc_required_bits);
         }
 
         let memory_type_index = match memory_type_index_opt {
@@ -764,7 +1183,7 @@ impl VulkanAllocator {
                     vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
                 let memory_type_index_opt =
-                    self.find_memorytype_index(&desc.requirements, mem_loc_preferred_bits);
+                    self.find_memorytype_index(&requirements, mem_loc_preferred_bits);
 
                 let memory_type_index = match memory_type_index_opt {
                     Some(x) => x as usize,
