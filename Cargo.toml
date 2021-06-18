@@ -17,14 +17,14 @@ include = [
 ]
 
 [dependencies]
-ash = { git = "https://github.com/MaikKlein/ash.git", rev = "9d6bf63b4e37f768b7cee85f9d82f4ac77b1fe22" }
+ash = { git = "https://github.com/MaikKlein/ash.git", rev = "a75d8e7e889bd75ac08f226539c04c7848823fcc" }
 backtrace = "0.3"
 log = "0.4"
 thiserror = "1.0"
 imgui = { version = "0.7", optional = true }
 
 [dev-dependencies]
-ash-window = { git = "https://github.com/MaikKlein/ash.git", rev = "9d6bf63b4e37f768b7cee85f9d82f4ac77b1fe22" }
+ash-window = { git = "https://github.com/MaikKlein/ash.git", rev = "a75d8e7e889bd75ac08f226539c04c7848823fcc" }
 winit = "0.25"
 
 [[example]]
